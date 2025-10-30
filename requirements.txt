@@ -1,5 +1,10 @@
-Flask
-gunicorn
-pandas==2.1.0
-numpy==1.26.4
+Flask==2.3.3
 requests
+bcrypt
+SQLAlchemy==1.4.52
+pytz
+gunicorn
+
+# SAFE VERSIONS FOR RENDER
+pandas==1.5.3
+numpy==1.23.5
