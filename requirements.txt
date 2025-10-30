@@ -4,7 +4,5 @@ bcrypt
 SQLAlchemy==1.4.52
 pytz
 gunicorn
-
-# SAFE VERSIONS FOR RENDER
 pandas==1.5.3
 numpy==1.23.5
