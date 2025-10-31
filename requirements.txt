@@ -4,5 +4,5 @@ bcrypt
 SQLAlchemy
 gunicorn==23.0.0
 pandas==1.5.3
-numpy
+numpy==1.23.5
 openpyxl
