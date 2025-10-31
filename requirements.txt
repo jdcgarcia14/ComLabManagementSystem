@@ -1,8 +1,7 @@
 Flask==2.3.3
-requests
+requests==2.32.5
 bcrypt
-SQLAlchemy==1.4.52
-pytz
-gunicorn
+SQLAlchemy
+gunicorn==23.0.0
 pandas==1.5.3
-numpy==1.23.5
+numpy
