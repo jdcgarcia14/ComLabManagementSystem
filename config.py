@@ -1,1 +1,1 @@
-NGROK_URL = "https://unhushable-natalya-ungaraged.ngrok-free.dev/"
+NGROK_URL = "https://comlabmanagementsystem.onrender.com/"
