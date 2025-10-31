@@ -1,7 +1,8 @@
 Flask==2.3.3
-requests==2.32.5
+requests==<ilagay ang bersyon dito>
 bcrypt
 SQLAlchemy
-gunicorn==23.0.0
+gunicorn==<ilagay ang bersyon dito>
 pandas==1.5.3
-numpy==1.23.5
+numpy
+openpyxl
