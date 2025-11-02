@@ -63,7 +63,8 @@ def init_db():
                 name TEXT,
                 grade_section TEXT,
                 password TEXT DEFAULT '',
-                status TEXT DEFAULT ''
+                status TEXT DEFAULT '',
+                deleted INTEGER DEFAULT 0
             )
         """)
 
@@ -143,9 +144,9 @@ init_db()
 
 # --- CREATE DEFAULT ADMIN ---
 def create_admin(username="admin", password="admin123"):
-    hashed = hash_password(password)
+
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (username, hashed))
+        conn.execute("INSERT OR IGNORE INTO admins (username, password) VALUES (?, ?)", (username, password))
         conn.commit()
 create_admin()
 
@@ -176,7 +177,7 @@ def index():
 def login_admin():
     if request.method == "POST":
         username = request.form["username"]
-        password = hash_password(request.form["password"])
+        password = request.form["password"]
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
             cur.execute("SELECT * FROM admins WHERE username = ? AND password = ?", (username, password))
@@ -204,12 +205,14 @@ def login_student():
 
         if student:
             session["student"] = username
+            session["pc_tag"] = pc_tag
             flash("✅ Logged in successfully")
+
 
             hostname = socket.gethostname()
             with sqlite3.connect(DB_FILE) as conn:
                 cur = conn.cursor()
-                cur.execute("SELECT tag FROM devices WHERE hostname = ?", (hostname,))
+                cur.execute("SELECT tag FROM devices WHERE hostname = ? ", (hostname,))
                 row = cur.fetchone()
                 pc_tag = row[0] if row else hostname
 
@@ -266,8 +269,7 @@ def register_admin():
                 flash("⚠️ Admin username already exists.")
                 return render_template("register_admin.html")
 
-            hashed_pw = hash_password(password)
-            cur.execute("INSERT INTO admins (username, password) VALUES (?, ?)", (username, hashed_pw))
+            cur.execute("INSERT INTO admins (username, password) VALUES (?, ?)", (username, password))
             conn.commit()
 
         flash("✅ Admin account created successfully.")
@@ -367,8 +369,7 @@ def student_dashboard():
 # --- LOGOUT ---
 @app.route("/logout")
 def logout():
-    pc_tag = request.args.get("pc_tag")
-
+    pc_tag = session.get("pc_tag")
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
@@ -377,9 +378,7 @@ def logout():
                 # clear device assignment
                 cur.execute("""
                     UPDATE devices
-                    SET last_assigned_student = assigned_student,
-                        assigned_student = NULL,
-                        used = 0
+                    SET used = 0
                     WHERE hostname = ? OR tag = ?
                 """, (pc_tag, pc_tag))
 
@@ -399,17 +398,14 @@ def logout():
         return jsonify({"error": str(e)}), 500
 @app.route("/api/logout", methods=["GET"])
 def api_logout():
-    pc_tag = request.args.get("pc_tag")
-
+    pc_tag = session.get("pc_tag")
     try:
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.cursor()
 
             cur.execute("""
                 UPDATE devices
-                SET last_assigned_student = assigned_student,
-                    assigned_student = NULL,
-                    used = 0
+                SET used = '0'
                 WHERE hostname = ? OR tag = ?
             """, (pc_tag, pc_tag))
 
@@ -463,9 +459,9 @@ def comlab_view(comlab_id):
 
         # 🖥️ Fetch all devices under this comlab
         cur.execute("""
-            SELECT id, tag, assigned_student, used
-            FROM devices
-            WHERE comlab_id = ?
+            SELECT id,tag, assigned_student, used
+            FROM devices d
+            WHERE d.comlab_id = ?
         """, (comlab_id,))
         devices = [dict(row) for row in cur.fetchall()]
 
@@ -574,6 +570,8 @@ def student_logout_event():
 
         # Remove active session
         cur.execute("DELETE FROM active_sessions WHERE pc_tag = ?", (pc_tag,))
+        cur.execute("UPDATE devices SET used = 0 WHERE tag = ?", (pc_tag,))
+
         conn.commit()
 
     print(f"👋 Device {pc_tag} unassigned after logout.")
@@ -655,9 +653,9 @@ def register_device(token):
             cur.execute("""
                         SELECT comlab_id
                         FROM devices
-                        WHERE hostname = ?
-                           OR tag = ?
-                        """, (hostname, tag))
+                        WHERE tag = ?
+                            OR hostname = ?
+                        """, (tag, hostname))
             existing = cur.fetchone()
 
             if existing:
@@ -913,6 +911,7 @@ def view_students():
         cur.execute("""
             SELECT s.id AS student_id, s.name AS student_name, s.grade_section
             FROM students s
+            WHERE deleted = 0 or NULL
             ORDER BY s.name ASC
         """)
         students = cur.fetchall()
@@ -920,13 +919,14 @@ def view_students():
         # Count anomalies per student (excluding cleared)
         cur.execute("""
             SELECT student_id, COUNT(*) AS anomaly_count
-            FROM anomalies
+            FROM anomalies a JOIN devices d ON a.device_id = d.id
             WHERE student_id IS NOT NULL 
               AND TRIM(student_id) != ''
-              AND (cleared = 0 OR cleared IS NULL)
-            AND (details NOT LIKE '%HIDClass%' OR details IS NULL)
-            AND (details NOT LIKE '%USB Input Device ((Standard system devices))%' OR details IS NULL)
-            GROUP BY student_id
+              AND (a.cleared = 0 OR a.cleared IS NULL)
+            AND (a.details NOT LIKE '%HIDClass%' OR a.details IS NULL)
+            AND (a.details NOT LIKE '%USB Input Device ((Standard system devices))%' OR a.details IS NULL)
+            
+            GROUP BY a.student_id
         """)
         anomaly_counts = {row["student_id"]: row["anomaly_count"] for row in cur.fetchall()}
 
@@ -950,35 +950,22 @@ def view_students():
 
     return render_template("students.html", students=student_data)
 
+@app.route("/api/delete_anomaly", methods=["POST"])
+def delete_anomaly():
+    data = request.get_json()
+    anomaly_id = data.get("id")
+    if not anomaly_id:
+        return jsonify({"success": False, "error": "Missing anomaly id"}), 400
 
-# ✅ Clear student's anomalies (soft clear) and update status
-@app.route("/clear_student/<student_id>", methods=["POST"])
-def clear_student(student_id):
     with sqlite3.connect(DB_FILE) as conn:
         cur = conn.cursor()
-
-        # Hanapin din yung pangalan ng student
-        cur.execute("SELECT name FROM students WHERE id = ?", (student_id,))
-        row = cur.fetchone()
-        student_name = row[0] if row else ""
-
-        # I-clear anomalies na may student_id or may pangalan niya sa field
-        cur.execute("""
-            UPDATE anomalies
-            SET cleared = 1
-            WHERE (student_id = ? OR student_id LIKE ? OR student_id LIKE ?)
-        """, (student_id, f"%{student_name}%", f"%{student_id}%"))
-        # Update student status
-        cur.execute("""
-             UPDATE anomalies
-             SET cleared = 1
-             WHERE (student_id = ? OR student_name = ?)
-         """, (student_id, student_name))
-
+        cur.execute("UPDATE anomalies SET cleared=1 WHERE id=?", (anomaly_id,))
         conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"success": False, "error": "No anomaly found"}), 404
 
-    flash(f"✅ Cleared anomalies for student {student_id}", "success")
-    return redirect("/students")
+    return jsonify({"success": True}), 200
+
 
 # ✅ Change student password (updates hashed login and plaintext admin view)
 @app.route("/students/<student_id>/change_password", methods=["POST"])
@@ -1005,15 +992,142 @@ def api_student_anomalies(student_id):
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         cur.execute("""
-            SELECT anomaly_type,details, detected_at, pc_tag
-            FROM anomalies 
-            WHERE student_id = ? AND cleared = 0
-            AND (details NOT LIKE '%HIDClass%' OR details IS NULL)
-            AND (details NOT LIKE '%USB Input Device ((Standard system devices))%' OR details IS NULL)
-            ORDER BY detected_at DESC
+            SELECT a.anomaly_type,a.details, a.detected_at, a.pc_tag, a.id
+            FROM anomalies a JOIN devices d ON a.device_id = d.id
+            WHERE a.student_id = ? AND a.cleared = 0
+            AND (a.details NOT LIKE '%HIDClass%' OR a.details IS NULL)
+            AND (a.details NOT LIKE '%USB Input Device ((Standard system devices))%' OR a.details IS NULL)
+            ORDER BY a.detected_at DESC
         """, (student_id,))
         anomalies = [dict(row) for row in cur.fetchall()]
     return jsonify(anomalies)
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+@app.route("/api/deleted_anomalies")
+def deleted_anomalies():
+    comlab_id = request.args.get("comlab_id")
+    date_filter = request.args.get("date", "")
+    device_filter = request.args.get("device_unit", "")
+    type_filter = request.args.get("anomaly_type", "")
+
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Select same fields as view_reports but only cleared=1
+        query = """
+            SELECT a.id, a.device_id, a.student_id, a.student_name,
+                   a.anomaly_type, a.details, a.detected_at,
+                   d.tag AS device_tag
+            FROM anomalies a
+            JOIN devices d ON a.device_id = d.id
+            WHERE d.comlab_id = ? AND a.cleared = 1
+        """
+        params = [comlab_id]
+
+        if date_filter:
+            query += " AND DATE(a.detected_at) = ?"
+            params.append(date_filter)
+        if device_filter:
+            query += " AND d.tag = ?"
+            params.append(device_filter)
+        if type_filter:
+            query += " AND a.anomaly_type = ?"
+            params.append(type_filter)
+
+        query += " ORDER BY a.detected_at DESC"
+
+        cur.execute(query, params)
+        deleted_anomalies = cur.fetchall()
+
+    # Convert to list of dicts for JSON
+    data = [dict(row) for row in deleted_anomalies]
+    return jsonify(data)
+
+
+@app.route("/api/restore_anomaly", methods=["POST"])
+def restore_anomaly():
+    data = request.get_json()
+    anomaly_id = data.get("id")
+
+    conn = get_db_connection()
+    conn.execute("UPDATE anomalies SET cleared = 0 WHERE id = ?", (anomaly_id,))
+    conn.commit()
+    conn.close()
+
+    return jsonify({"success": True})
+@app.route("/api/delete_device", methods=["POST"])
+def delete_device():
+    data = request.get_json()
+    device_id = data.get("id")
+
+    if not device_id:
+        return jsonify({"success": False, "message": "No device ID provided"}), 400
+
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.cursor()
+
+            # Optional: check if device exists
+            cur.execute("SELECT id FROM devices WHERE id = ?", (device_id,))
+            if not cur.fetchone():
+                return jsonify({"success": False, "message": "Device not found"}), 404
+
+            # Delete the device
+            cur.execute("DELETE FROM devices WHERE id = ?", (device_id,))
+            conn.commit()
+
+        return jsonify({"success": True})
+
+    except Exception as e:
+        print("Error deleting device:", e)
+        return jsonify({"success": False, "message": str(e)}), 500
+@app.route("/delete_student/<student_id>", methods=["POST"])
+def delete_student(student_id):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE students SET deleted = 1 WHERE id = ?", (student_id,))
+        cur.execute("DELETE FROM student_users WHERE username = ?", (student_id,))
+        conn.commit()
+    flash(f"Student {student_id} has been deleted.", "success")
+    return redirect("/students")
+@app.route("/admins")
+def view_admins():
+    # Only allow access if logged in as an admin
+    if "admin" not in session:
+        flash("❌ Please log in as admin first.")
+        return redirect(url_for("login_admin"))
+
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT id, username, password FROM admins ORDER BY id ASC")
+        admins = cur.fetchall()
+
+    return render_template("admins.html", admins=admins)
+@app.route("/admins/<int:admin_id>/change_password", methods=["POST"])
+def change_admin_password(admin_id):
+    new_password = request.form.get("new_password")
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE admins SET password = ? WHERE id = ?", (new_password, admin_id))
+        conn.commit()
+
+    flash("✅ Admin password updated successfully.")
+    return redirect(url_for("view_admins"))
+@app.route("/delete_admin/<int:admin_id>")
+def delete_admin(admin_id):
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM admins WHERE id = ?", (admin_id,))
+        conn.commit()
+
+    flash("✅ Admin removed successfully.")
+    return redirect(url_for("view_admins"))
 
 if __name__ == "__main__":
     init_db()  # ensure tables exist
