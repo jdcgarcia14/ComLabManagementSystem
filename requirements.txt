@@ -9,4 +9,3 @@ numpy==1.23.5
 openpyxl
 =======
 openpyxl
->>>>>>> 2ac5e24b0504009c95a78d98d29e3779d81406a2
